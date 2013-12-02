@@ -29,12 +29,12 @@ int get_offset(int block, int offset=0)
 
 void fill_free_list(int block_num)
 {
-			lseek(fd, 402 * block_size, SEEK_SET);
-			for(int i = 0; i < 101; i ++)
-			{
-				read(fd, &buf, sizeof(buf));
-				cout << buf << endl;
-			}
+			// lseek(fd, 402 * block_size, SEEK_SET);
+			// for(int i = 0; i < 101; i ++)
+			// {
+			// 	read(fd, &buf, sizeof(buf));
+			// 	cout << buf << endl;
+			// }
 	lseek(fd, get_offset(block_num), SEEK_SET);
 	read(fd, &nfree, sizeof(nfree));
 
@@ -51,10 +51,12 @@ int alloc_block()
 	nfree--;
 	if(nfree > 0)
 	{
+		cout << endl << "allocating " << free_blocks[nfree] << endl;
 		return free_blocks[nfree];
 	}
 	unsigned int new_block = free_blocks[0];
 	fill_free_list(new_block);
+	cout << endl << "allocating " << new_block << endl;
 	return new_block;
 }
 
@@ -69,6 +71,20 @@ struct inode
 	unsigned int actime;
 	unsigned int modtime;
 } initial, check;
+
+inode get_inode(int inum)
+{
+	inode current;
+	lseek(fd, 2 * block_size + (inum - 1) * sizeof(inode), SEEK_SET);
+	read(fd, &current, sizeof(current));
+	return current;	
+}
+
+void write_inode(int inum, inode current)
+{
+	lseek(fd, 2 * block_size + (inum - 1) * sizeof(inode), SEEK_SET);
+	write(fd, &current, sizeof(current));
+}
 
 struct dir_entry
 {
@@ -134,9 +150,7 @@ void add_dir_entry(int dir, int inode_num, string name)
 
 void init_inode(int dir, int flag)
 {
-	inode current;
-	lseek(fd, 2 * block_size + (dir - 1) * sizeof(inode), SEEK_SET);
-	read(fd, &current, sizeof(current));
+	inode current = get_inode(dir);
 	current.flags |= 0x8000; // set alloc
 	// set others to false here? not really needed since we don't have to worry about deletion...
 	switch(flag)
@@ -150,19 +164,17 @@ void init_inode(int dir, int flag)
 		cout << "setting to large" << endl;
 				break;
 	}
-	lseek(fd, 2 * block_size + (dir - 1) * sizeof(inode), SEEK_SET);
-	write(fd, &current, sizeof(current));
+	write_inode(dir, current);
 }
 
 void read_contents(int inum)
 {
-	inode current;
-	lseek(fd, 2 * block_size + (inum - 1) * sizeof(inode), SEEK_SET);
-	read(fd, &current, sizeof(current));
+	inode current = get_inode(inum);
 	cout << endl << "current size " << current.size << endl;
 	lseek(fd, get_offset(current.addr[0]), SEEK_SET);
 	dir_entry temp_entry;
-	for(int i = 0; i < current.size / 16; i++)
+	// this only reads one block - but we don't need this function later so we can delete it
+	for(int i = 0; i < current.size / (block_size / sizeof(inode)); i++)
 	{
 		read(fd, &temp_entry, sizeof(temp_entry));
 		cout << temp_entry.inode_num << " ";
@@ -173,15 +185,12 @@ void read_contents(int inum)
 }
 void copy_to_inode(int inum, int size)
 {
-	inode current;
-	lseek(fd, 2 * block_size + (inum - 1) * sizeof(inode), SEEK_SET);
-	read(fd, &current, sizeof(current));
+	inode current = get_inode(inum);
 	char buffer[block_size];
 	int nread, position;
 	current.size = size;
 	position = lseek(fd2, 0, SEEK_SET);
-
-	if((current.flags & 0x6000) == 0x6000) // plain
+	if((current.flags & 0x6000) == 0x6000) //plain
 	{
 		while((nread=read(fd2, buffer, sizeof(buffer))) > 0)
 		{
@@ -191,56 +200,33 @@ void copy_to_inode(int inum, int size)
 			position+=nread;
 		}
 	}
-	else if((current.flags & 0x1000) == 0x1000) // large
+	else if((current.flags & 0x1000) == 0x1000) //large
 	{
-		unsigned int counter = 0, indirect_block, new_block;
+		int counter;
+		unsigned int new_block;
 
-		while((nread=read(fd2, buffer, sizeof(buffer))) > 0 && counter < (26 * block_size / 4))
+		for(int i = 0; i < size / (block_size * block_size / sizeof(new_block))+1; i++)
 		{
-			if(counter % (block_size / 4) == 0)
+			counter = 0;
+			current.addr[i] = alloc_block();
+			while(counter < (block_size / sizeof(new_block)) && (nread=read(fd2, buffer, sizeof(buffer))) > 0)
 			{
-				indirect_block = alloc_block();
-				current.addr[counter / (block_size / 4)] = indirect_block;
+				new_block = alloc_block();
+				lseek(fd, get_offset(current.addr[i], sizeof(new_block)*counter), SEEK_SET);
+				write(fd, &new_block, sizeof(new_block));
+				lseek(fd, get_offset(new_block), SEEK_SET);
+				write(fd, buffer, sizeof(buffer));
+				counter++;
 			}
-			new_block = alloc_block();
-			lseek(fd, get_offset(new_block), SEEK_SET);
-			write(fd, buffer, sizeof(buffer));
-
-			lseek(fd, get_offset(indirect_block, (counter % (block_size / 4)) * sizeof(new_block)), SEEK_SET);
-			write(fd, &new_block, sizeof(new_block));
-			counter++;
 		}
-		lseek(fd, -nread, SEEK_CUR); // Unread the overflow
 
-		current.addr[26] = alloc_block(); // Double indirect block
-
-		while((nread=read(fd2, buffer, sizeof(buffer))) > 0)
-		{
-			if(counter % (block_size / 4) == 0)
-			{
-				indirect_block = alloc_block();
-				lseek(fd, get_offset(current.addr[26], (counter / (block_size / 4) - 26) * sizeof(new_block)), SEEK_SET);
-				write(fd, &indirect_block, sizeof(indirect_block));
-			}
-			new_block = alloc_block();
-			lseek(fd, get_offset(new_block), SEEK_SET);
-			write(fd, buffer, sizeof(buffer));
-			
-			lseek(fd, get_offset(indirect_block, (counter % (block_size / 4)) * sizeof(new_block)), SEEK_SET);
-			write(fd, &new_block, sizeof(new_block));
-			counter++;
-		}
-		cout << counter << endl;
 	}
-	lseek(fd, 2 * block_size + (inum - 1) * sizeof(inode), SEEK_SET);
-	write(fd, &current, sizeof(current));
+	write_inode(inum, current);
 }
 
 void copy_from_inode(int inum)
 {
-	inode current;
-	lseek(fd, 2 * block_size + (inum - 1) * sizeof(inode), SEEK_SET);
-	read(fd, &current, sizeof(current));
+	inode current = get_inode(inum);
 	char buffer[block_size];
 	int nread;
 	unsigned int num_blocks = current.size / block_size + 1;
@@ -254,38 +240,33 @@ void copy_from_inode(int inum)
 			write(fd2, buffer, nread);
 		}
 	}
-	else if((current.flags & 0x1000) == 0x6000) // large
+	else if((current.flags & 0x1000) == 0x1000) // large
 	{
-		unsigned int counter = 0, indirect_block, next_block;
-
-		while(counter < num_blocks && counter < 26 * block_size / 4)
+		int counter,counter2, last_block;
+		last_block = current.size / block_size;
+		unsigned int second_block;
+		counter2 = 0;
+		for(int i = 0; i < current.size / (block_size * block_size / sizeof(second_block))+1; i++)
 		{
-			indirect_block = current.addr[counter / (block_size / 4)];
-			do{
-				lseek(fd, get_offset(indirect_block, counter % (block_size / 4) * sizeof(next_block)), SEEK_SET);
-				read(fd, &next_block, sizeof(next_block));
-
-				lseek(fd, get_offset(next_block), SEEK_SET);
+			counter = 0;
+			// current.addr[i] = alloc_block();
+			while(counter < (block_size / sizeof(second_block)))
+			{
+				lseek(fd, get_offset(current.addr[i], sizeof(second_block)*counter), SEEK_SET);
+				read(fd, &second_block, sizeof(second_block));
+				lseek(fd, get_offset(second_block), SEEK_SET);
+				counter2++;
+				if(counter2 > last_block)
+				{
+					nread = read(fd, buffer, current.size % block_size);
+					write(fd2, buffer, nread);
+					break;
+				}
 				nread = read(fd, buffer, sizeof(buffer));
 				write(fd2, buffer, nread);
 				counter++;
-			}while(counter < num_blocks - 1 && !(counter % (block_size / 4) == 0));
+			}
 		}
-		while(counter < num_blocks)
-		{
-			lseek(fd, get_offset(current.addr[26], counter / (block_size / 4) - 26), SEEK_SET);
-			read(fd, &indirect_block, sizeof(indirect_block));
-			do{
-				lseek(fd, get_offset(indirect_block, (counter % (block_size / 4) * sizeof(next_block))), SEEK_SET);
-				read(fd, &next_block, sizeof(next_block));
-
-				lseek(fd, get_offset(next_block), SEEK_SET);
-				nread = read(fd, buffer, sizeof(buffer));
-				write(fd2, buffer, nread);
-				counter++;
-			}while(counter < num_blocks && !(counter % (block_size / 4) == 0));
-		}
-		cout << counter << endl;
 	}
 }
 
@@ -335,7 +316,7 @@ int main()
 			isize = 300;
 			fd = open(filename.c_str(), O_CREAT|O_TRUNC|O_RDWR, S_IRWXU|S_IRWXG|S_IRWXO);
 			// setting length of file
-			ftruncate(fd, (off_t)fsize * block_size);
+			ftruncate(fd, (off_t)(fsize + 2)* block_size);
 			// init free list
 			/*
 
@@ -355,40 +336,60 @@ int main()
 				Block 1999: empty (last free block listed in 1902)
 
 			*/
-			int free_chain_size = (fsize - isize - 3) / 100 + 1;
-			for(int i = 0; i < free_chain_size; i++)
-			{
-				lseek(fd, (2 + isize + 100 * i) * block_size, SEEK_SET);
-				if(i == free_chain_size - 1) // last free-chain block
-				{
-					buf = (fsize - isize - 3) % 100;
-					write(fd, &buf, sizeof(buf));
+			// int free_chain_size = (fsize - isize - 3) / 100 + 1;
+			// for(int i = 0; i < free_chain_size; i++)
+			// {
+			// 	lseek(fd, get_offset(100 * i), SEEK_SET);
+			// 	if(i == free_chain_size - 1) // last free-chain block
+			// 	{
+			// 		buf = (fsize - isize - 3) % 100;
+			// 		write(fd, &buf, sizeof(buf));
 					
-					buf = 0;
-					write(fd, &buf, sizeof(buf));
+			// 		buf = 0;
+			// 		write(fd, &buf, sizeof(buf));
 
-					for(int j = 1; j < (fsize - isize - 2) % 100; j++)
-					{
-						buf = 2 + isize + 100 * i + j;
-						write(fd, &buf, sizeof(buf));
-					}
-				}
-				else
+			// 		for(int j = 1; j < (fsize - isize - 2) % 100; j++)
+			// 		{
+			// 			buf = 2 + isize + 100 * i + j;
+			// 			write(fd, &buf, sizeof(buf));
+			// 		}
+			// 	}
+			// 	else
+			// 	{
+			// 		buf = 100;
+			// 		write(fd, &buf, sizeof(buf));
+
+			// 		buf = 2 + isize + 100 * (i+1);
+			// 		write(fd, &buf, sizeof(buf));
+
+			// 		for(int j = 1; j < 100; j++)
+			// 		{
+			// 			buf = 2 + isize + 100 * i + j;
+			// 			write(fd, &buf, sizeof(buf));
+			// 		}
+			// 	}
+			// }
+			for(int i = 0; i < (fsize - isize - 1) / 100; i++)
+			{
+				lseek(fd, (2 + isize+100*(i+1))*block_size, SEEK_SET);
+				buf = 100;
+				write(fd, &buf, sizeof(buf));
+				for(int j = 0; j < 100; j++)
 				{
-					buf = 100;
+					buf = 2 + isize + 100 * i + j;
 					write(fd, &buf, sizeof(buf));
-
-					buf = 2 + isize + 100 * (i+1);
-					write(fd, &buf, sizeof(buf));
-
-					for(int j = 1; j < 100; j++)
-					{
-						buf = 2 + isize + 100 * i + j;
-						write(fd, &buf, sizeof(buf));
-					}
-				}
+				}	
 			}
-			fill_free_list(2 + isize);
+			nfree = (fsize - isize - 1) % 100 + 1;
+			temp = (fsize - isize - 1) / 100;
+			temp *= 100;
+			temp += (2 + isize);
+			for(int j = 0; j < nfree; j++)
+			{
+				free_blocks[j] = temp + j;
+			}
+
+			// fill_free_list(2 + isize);
 
 			// init inodes
 			initial.flags = 0xC000;	// alloc, dir
@@ -411,8 +412,8 @@ int main()
 		{
 			cout << "cpin" << endl;
 			string external_file, v6_file;
-			// ss >> external_file;
-			external_file = "asdf2";
+			ss >> external_file;
+			// external_file = "asdf2";
 			// ss >> v6_file;
 			v6_file = "test1";
 			fd2 = open(external_file.c_str(), O_RDONLY);
@@ -447,7 +448,7 @@ int main()
 			// ss >> v6_file;
 			v6_file = "test1";
 			// ss >> external_file;
-			external_file = "copied_to2";
+			external_file = "copied";
 			int inum = get_inode_number(v6_file);
 			if(inum == -1)
 			{
