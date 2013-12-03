@@ -8,7 +8,7 @@
 //   ./fsaccess
 
 // available commands are:
-// initfs, cpin, cpout, mkdir, q, ls
+// initfs, cpin, cpout, mkdir, q, ls, cd, use
 
 #include <unistd.h>
 #include <iostream>
@@ -292,11 +292,13 @@ void copy_to_inode(int inum, int size)
 	{
 		int counter;
 		unsigned int new_block;
-
+		// start of indirect blocks loop
 		for(int i = 0; i < size / (block_size * block_size / sizeof(new_block))+1; i++)
 		{
 			counter = 0;
 			current.addr[i] = alloc_block();
+			// fills each indirect block with the address of the data block
+			// then fills the data block with the data
 			while(counter < (block_size / sizeof(new_block)) && (nread=read(fd2, buffer, sizeof(buffer))) > 0)
 			{
 				new_block = alloc_block();
@@ -327,7 +329,7 @@ void copy_from_inode(int inum)
 		for(int i = 0; i < num_blocks; i++)
 		{
 			lseek(fd, get_offset(current.addr[i]), SEEK_SET);
-			nread = read(fd, buffer, (i < num_blocks - 1) ? sizeof(buffer) : current.size % block_size);
+			nread = read(fd, buffer, (i < num_blocks - 1) ? sizeof(buffer) : current.size % block_size); // ternary operator to check if it's the last block, in which case it might not have the full block size of data
 			write(fd2, buffer, nread);
 		}
 	}
@@ -338,15 +340,19 @@ void copy_from_inode(int inum)
 		unsigned int counter, counter2, second_block, last_block;
 		last_block = current.size / block_size;
 		counter2 = 0;
+		// start of indirect block for loop
 		for(int i = 0; i < current.size / (block_size * block_size / sizeof(second_block))+1; i++)
 		{
 			counter = 0;
 			while(counter < (block_size / sizeof(second_block)))
 			{
+				// gets address of data block
 				lseek(fd, get_offset(current.addr[i], sizeof(second_block)*counter), SEEK_SET);
 				read(fd, &second_block, sizeof(second_block));
+				// goes to data block to read data
 				lseek(fd, get_offset(second_block), SEEK_SET);
 				counter2++;
+				// on last block might not have full block size of data
 				if(counter2 > last_block)
 				{
 					nread = read(fd, buffer, current.size % block_size);
@@ -668,7 +674,7 @@ int main()
 
 
 		}
-		else if(first == "help")
+		else if(first == "help") // Lists available commands
 		{
 			cout << endl << "Available commands: " << endl;
 			cout << "initfs <file name of file system> <# of total blocks> <# of inode blocks>" << endl;
