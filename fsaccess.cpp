@@ -23,10 +23,37 @@
 
 using namespace std;
 
-unsigned int isize, fsize, nfree, ninode, fd, fd2, buf, temp;
+unsigned int isize, fsize, nfree, ninode, buf, temp, current_inode;
+int fd, fd2; // can't be unsigned because will return -1 on error
 unsigned int free_blocks[100]; // free is a keyword
 unsigned int free_inodes[100];
 unsigned short block_size = 2048, avail_blocks;
+
+// Writes super block to the file system
+void write_super()
+{
+	lseek(fd, 1 * block_size, SEEK_SET);
+	write(fd, &isize, sizeof(isize));
+	write(fd, &fsize, sizeof(fsize));
+	write(fd, &nfree, sizeof(nfree));
+	write(fd, &ninode, sizeof(ninode));
+	write(fd, &avail_blocks, sizeof(avail_blocks));
+	write(fd, free_blocks, sizeof(free_blocks));
+	write(fd, free_inodes, sizeof(free_inodes));
+}
+
+// Reads from the super block of the file system
+void read_super()
+{
+	lseek(fd, 1 * block_size, SEEK_SET);
+	read(fd, &isize, sizeof(isize));
+	read(fd, &fsize, sizeof(fsize));
+	read(fd, &nfree, sizeof(nfree));
+	read(fd, &ninode, sizeof(ninode));	
+	read(fd, &avail_blocks, sizeof(avail_blocks));
+	read(fd, free_blocks, sizeof(free_blocks));
+	read(fd, free_inodes, sizeof(free_inodes));
+}
 
 int get_offset(int block, int offset=0)
 {
@@ -338,16 +365,14 @@ void copy_from_inode(int inum)
 // Returns -1 if not found.
 int get_inode_number(string name)
 {
-	inode root;
+	current = get_inode(current_inode);
 	dir_entry temp_entry;
-	lseek(fd, 2 * block_size, SEEK_SET);
-	read(fd, &root, sizeof(root));
 
-	for(int i = 0; i < root.size / 16; i++)
+	for(int i = 0; i < current.size / 16; i++)
 	{
 		if(i % sizeof(inode) == 0)
 		{
-			lseek(fd, get_offset(root.addr[i / sizeof(inode)]), SEEK_SET);
+			lseek(fd, get_offset(current.addr[i / sizeof(inode)]), SEEK_SET);
 		}
 		read(fd, &temp_entry, sizeof(temp_entry));
 		if(strcmp(name.c_str(), temp_entry.name) == 0)
@@ -358,10 +383,19 @@ int get_inode_number(string name)
 	return -1;
 }
 
+// Checks if an inode is a directory or not
+bool inode_is_dir(int inum)
+{
+	current = get_inode(inum);
+	return flag_is_set(current.flags, DIR);
+}
+
 int main()
 {
 	// Main loop for reading commands
+	cout << "Type 'help' to see list of available commands" << endl;
 	string command = "";
+	bool fs_active = false; // checks if there is a file system active
 	string first, filename, dirname;
 
 	stringstream ss;
@@ -373,6 +407,12 @@ int main()
 		ss >> first;
 		if(first == "initfs")
 		{
+			if(fs_active)
+			{
+				cout << "There is already an active file system. Please quit and start again." << endl;
+				ss.clear();
+				continue;
+			}
 			ss >> filename >> fsize >> isize;
 			if(filename == "" || fsize < 6 || isize < 1 || fsize < isize)
 			{
@@ -411,6 +451,7 @@ int main()
 				inode initial = {0};
 				set_flag(initial.flags, ALLOC);
 				set_flag(initial.flags, DIR);
+				current_inode = 1;
 
 				lseek(fd, 2 * block_size, SEEK_SET);
 				write(fd, &initial, sizeof(initial));
@@ -420,124 +461,224 @@ int main()
 
 				// Find free inodes and add to inode list
 				fill_inode_list();
+				fs_active = true;
 
 			}
 		}
 		else if(first == "cpin") // Copy an external file into the filesystem
 		{
-			string external_file, v6_file;
-			ss >> external_file >> v6_file;
-			if(v6_file == "" || external_file == "")
+			if(fs_active)
 			{
-				cout << "Please input a source file and a destination file." << endl;
-			}
-			else
-			{
-				fd2 = open(external_file.c_str(), O_RDONLY);
-				if(fd2 == -1)
+				string external_file, v6_file;
+				ss >> external_file >> v6_file;
+				if(v6_file == "" || external_file == "")
 				{
-					cout << "The source file couldn't be opened for reading." << endl;
+					cout << "Please input a source file and a destination file." << endl;
 				}
 				else
 				{
-					// Get filesize
-					struct stat stats;
-					fstat(fd2, &stats);
-					int size = stats.st_size;
-					/*
-						Max size:
-						27 addr blocks * 512 indirect blocks
-							- 1 indirect block for every 512 data blocks
-							- 1 possible block to extend the directory listing
-					*/
-					if(size > (27 * block_size / 4 * block_size) / (1 + 1 / (block_size / 4)) - block_size)
+					fd2 = open(external_file.c_str(), O_RDONLY);
+					if(fd2 == -1)
 					{
-						cout << "The file is too large for the filesystem, max is " << 27 * (block_size / 4) * block_size * (1 - 1 / (block_size / 4)) - block_size << " bytes." << endl;
-					}
-					else if(size > (avail_blocks * block_size) / (1 + 1 / (block_size / 4)) - block_size)
-					{
-						cout << "The file is too large, we need " << ceil(size / block_size) + (size / block_size) / (block_size / 4) + 1 << " free blocks to store it but we only have " << avail_blocks / (1 + 1 / (block_size / 4)) - 1 <<  "." << endl;
+						cout << "The source file couldn't be opened for reading." << endl;
 					}
 					else
 					{
-						int inum = alloc_inode();
-						if(inum == -1)
+						// Get filesize
+						struct stat stats;
+						fstat(fd2, &stats);
+						int size = stats.st_size;
+						/*
+							Max size:
+							27 addr blocks * 512 indirect blocks
+								- 1 indirect block for every 512 data blocks
+								- 1 possible block to extend the directory listing
+						*/
+						if(size > (27 * block_size / 4 * block_size) / (1 + 1 / (block_size / 4)) - block_size)
 						{
-							cout << "There are no more inodes available." << endl;
+							cout << "The file is too large for the filesystem, max is " << 27 * (block_size / 4) * block_size * (1 - 1 / (block_size / 4)) - block_size << " bytes." << endl;
+						}
+						else if(size > (avail_blocks * block_size) / (1 + 1 / (block_size / 4)) - block_size)
+						{
+							cout << "The file is too large, we need " << ceil(size / block_size) + (size / block_size) / (block_size / 4) + 1 << " free blocks to store it but we only have " << avail_blocks / (1 + 1 / (block_size / 4)) - 1 <<  "." << endl;
 						}
 						else
 						{
-							// Allocate and report size of file
-							init_inode(inum, (size > 27 * block_size) ? LARGE : PLAIN);
-							add_dir_entry(1, inum, v6_file);
-							copy_to_inode(inum, size);
+							int inum = alloc_inode();
+							if(inum == -1)
+							{
+								cout << "There are no more inodes available." << endl;
+							}
+							else
+							{
+								// Allocate and report size of file
+								init_inode(inum, (size > 27 * block_size) ? LARGE : PLAIN);
+								add_dir_entry(current_inode, inum, v6_file);
+								copy_to_inode(inum, size);
+							}
 						}
-					}
-				}
-				close(fd2);
-			}
-		}
-		else if(first == "cpout") // Copy an internal file out of the filesystem
-		{
-			string external_file, v6_file;
-			ss >> v6_file >> external_file;
-			if(v6_file == "" || external_file == "")
-			{
-				cout << "Please input a source file and a destination file." << endl;
-			}
-			else
-			{
-				int inum = get_inode_number(v6_file);
-				if(inum == -1)
-				{
-					cout << "The source file is invalid." << endl;
-				}
-				else
-				{
-					fd2 = open(external_file.c_str(), O_WRONLY|O_CREAT|O_TRUNC, S_IRUSR|S_IWUSR);
-					if(fd2 == -1)
-					{
-						cout << "The destination file couldn't be opened for writing." << endl;
-					}
-					else
-					{
-						copy_from_inode(inum);
 					}
 					close(fd2);
 				}
 			}
-		}
-		else if(first == "ls") // List contents of the root directory
-		{
-			read_contents(1);
-		}
-		else if(first == "mkdir") // Make a new directory in the root directory
-		{
-			ss >> dirname;
-			if(dirname == "")
+			else
 			{
-				cout << "Please input a name for the directory." << endl;
+				cout << "There is not a file system active right now. Please use 'initfs' or 'use' to start one." << endl;
 			}
-			else if(avail_blocks - 1 == 0)
+		}
+		else if(first == "cpout") // Copy an internal file out of the filesystem
+		{
+			if(fs_active)
 			{
-				cout << "We need at least one block to make a new directory." << endl;
+				string external_file, v6_file;
+				ss >> v6_file >> external_file;
+				if(v6_file == "" || external_file == "")
+				{
+					cout << "Please input a source file and a destination file." << endl;
+				}
+				else
+				{
+					int inum = get_inode_number(v6_file);
+					if(inum == -1)
+					{
+						cout << "The source file is invalid." << endl;
+					}
+					else
+					{
+						fd2 = open(external_file.c_str(), O_WRONLY|O_CREAT|O_TRUNC, S_IRUSR|S_IWUSR);
+						if(fd2 == -1)
+						{
+							cout << "The destination file couldn't be opened for writing." << endl;
+						}
+						else
+						{
+							copy_from_inode(inum);
+						}
+						close(fd2);
+					}
+				}
 			}
 			else
 			{
-				// Create new directory inode
-				int inum = alloc_inode();
-				init_inode(inum, DIR);
-
-				// Add to root directory
-				add_dir_entry(1, inum, dirname);
-				add_dir_entry(inum, inum, ".");
-				add_dir_entry(inum, 1, "..");
+				cout << "There is not a file system active right now. Please use 'initfs' or 'use' to start one." << endl;				
 			}
+		}
+		else if(first == "ls") // List contents of the current directory
+		{
+			if(fs_active)
+			{
+				read_contents(current_inode);
+			}
+			else
+			{
+				cout << "There is not a file system active right now. Please use 'initfs' or 'use' to start one." << endl;
+			}
+		}
+		else if(first == "mkdir") // Make a new directory in the root directory
+		{
+			if(fs_active)
+			{
+				ss >> dirname;
+				if(dirname == "")
+				{
+					cout << "Please input a name for the directory." << endl;
+				}
+				else if(avail_blocks - 1 == 0)
+				{
+					cout << "We need at least one block to make a new directory." << endl;
+				}
+				else
+				{
+					// Create new directory inode
+					int inum = alloc_inode();
+					init_inode(inum, DIR);
+
+					// Add to current directory
+					add_dir_entry(current_inode, inum, dirname);
+					add_dir_entry(inum, inum, ".");
+					add_dir_entry(inum, current_inode, "..");
+				}
+			}
+			else
+			{
+				cout << "There is not a file system active right now. Please use 'initfs' or 'use' to start one." << endl;
+			}
+		}
+		else if(first == "cd") // Changes current directory
+		{
+			if(fs_active)
+			{
+				ss >> dirname;
+				if(dirname != "")
+				{
+					int inum = get_inode_number(dirname);
+					if(inum!= -1 && inode_is_dir(inum))
+					{
+						current_inode = inum;
+					}
+					else
+					{
+						cout << "Invalid directory" << endl;
+					}
+				}
+			}
+			else
+			{
+				cout << "There is not a file system active right now. Please use 'initfs' or 'use' to start one." << endl;
+			}
+
 		}
 		else if(first == "q") // Quit
 		{
-			close(fd);
+			if(fs_active)
+			{
+				write_super();
+				close(fd);
+			}
 			cout << "Goodbye." << endl;
+		}
+		else if(first == "use") // Open existing file system and use it
+		{
+			if(!fs_active)
+			{
+				ss >> filename;
+				if(filename == "")
+				{
+					cout << "Please specify a file name" << endl;
+				}
+				else
+				{
+					fd = open(filename.c_str(), O_RDWR);
+					if(fd == -1)
+					{
+						cout << "The file could not be opened for reading" << endl;
+					}
+					else
+					{
+						read_super();
+						current_inode = 1;
+						fs_active = true;
+					}
+				}
+			}
+			else
+			{
+				cout << "There is already an active file system, please quit and start again" << endl;
+			}
+
+
+		}
+		else if(first == "help")
+		{
+			cout << endl << "Available commands: " << endl;
+			cout << "initfs <file name of file system> <# of total blocks> <# of inode blocks>" << endl;
+			cout << "cpin <external file> <v6 file>" << endl;
+			cout << "cpout <v6 file> <external file>" << endl;
+			cout << "mkdir <v6 dir>" << endl;
+			cout << "use <file name of file system> (use existing file system file)" << endl;
+			cout << "ls (lists current directory entries)" << endl;
+			cout << "cd <v6 dir> (changes directories)" << endl;
+			cout << "q" << endl << endl;
 		}
 		else
 		{
