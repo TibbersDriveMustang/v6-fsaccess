@@ -159,7 +159,7 @@ int flag_is_set(unsigned short flags, inode_flag i_flag)
 			break;
 		case PLAIN: return (flags & 0x6000) == 0x6000;
 			break;
-		case DIR: return (flags & 0x4000) == 0x4000;
+		case DIR: return ((flags & 0x4000) == 0x4000) && ((flags | ~(0x2000)) == ~(0x2000));
 			break;
 		case LARGE: return (flags & 0x1000) == 0x1000;
 			break;
