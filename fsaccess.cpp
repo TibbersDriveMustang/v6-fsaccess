@@ -1,8 +1,14 @@
+// CS 4348.HON Project 2: Unix V6 -based file system
+// Joshua Cai and Casey Ross
+
 // run on cs2.utdallas.edu
 // compile with: 
 //   g++ -o fsaccess fsaccess.cpp
 // run with:
 //   ./fsaccess
+
+// available commands are:
+// initfs, cpin, cpout, mkdir, q, ls
 
 #include <unistd.h>
 #include <iostream>
@@ -26,7 +32,10 @@ int get_offset(int block, int offset=0)
 {
 	return block * block_size + offset;
 }
-
+ 
+// Copy block numbers found in the given block to the free list.
+// The first word of the block should have the number of numbers in the next 100 blocks.
+// The second word of the block should be the number of another such block.
 void fill_free_list(int block_num)
 {
 	lseek(fd, get_offset(block_num), SEEK_SET);
@@ -39,32 +48,43 @@ void fill_free_list(int block_num)
 	}
 }
 
+// Get a free block number from the free list.
+// Don't call this if there are none left.
 int alloc_block()
 {
 	nfree--;
 	if(nfree > 0)
 	{
-		// cout << endl << "allocating " << free_blocks[nfree] << endl;
 		avail_blocks --;
 		return free_blocks[nfree];
 	}
+
+	// Refill list using free_blocks[0]
 	unsigned int new_block = free_blocks[0];
 	fill_free_list(new_block);
-	// cout << endl << "allocating " << free_blocks[nfree] << endl;
+	
 	avail_blocks --;
 	return new_block;
 }
 
+// A 128-byte (with padding) inode.
 struct inode
 {
 	unsigned short flags;
-	char nlinks;
-	char uid;
-	char gid;
-	unsigned int size;
-	unsigned int addr[27];
-	unsigned int actime;
-	unsigned int modtime;
+	/*
+		Flags currently in use (from left to right):
+		Bit		Meaning
+		0		Allocated if 1
+		1-2		Plain file if 11, directory if 10
+		3		Large file if 1
+	*/
+	char nlinks; // Number of links to inode (unused)
+	char uid; // User id of owner (unused)
+	char gid; // Group id of owner (unused)
+	unsigned int size; // Size in bytes
+	unsigned int addr[27]; // Addresses of direct or indirect data blocks
+	unsigned int actime; // Time of last access (unused)
+	unsigned int modtime; // Time of last modification (unused)
 } initial, current;
 
 inode get_inode(int inum)
@@ -82,10 +102,10 @@ void write_inode(int inum, inode node)
 
 enum inode_flag
 {
-	ALLOC,
-	PLAIN,
-	DIR,
-	LARGE
+	ALLOC, // Is allocated
+	PLAIN, // Is a regular file
+	DIR, // Is a directory
+	LARGE // Is a large file (more than ~55kB)
 };
 
 void set_flag(unsigned short &flags, inode_flag i_flag)
@@ -119,12 +139,14 @@ int flag_is_set(unsigned short flags, inode_flag i_flag)
 	}
 }
 
+// A 16-byte directory entry.
 struct dir_entry
 {
 	unsigned short inode_num;
 	char name[14];
 };
 
+// Search for and add free inodes to the inode list (up to 100).
 void fill_inode_list()
 {
 	lseek(fd, 2 * block_size, SEEK_SET);
@@ -145,6 +167,8 @@ void fill_inode_list()
 	ninode = counter;
 }
 
+// Get a free inode number from the inode list.
+// Returns -1 if there are none.
 int alloc_inode()
 {
 	if(ninode > 0)
@@ -152,19 +176,25 @@ int alloc_inode()
 		ninode--;
 		return free_inodes[ninode];
 	}
-	// ninode is 0 if it gets here
+
+	// List is empty, so...
 	fill_inode_list();
 	if(ninode > 0)
+	{
 		return alloc_inode(); 
-	//no inodes left!
+	}
+	
+	// No inodes left!
 	return -1;
 }
 
+// Make a new entry in the given directory with the given inode number and name.
 void add_dir_entry(int dir, int inode_num, string name)
 {
 	dir_entry entry;
 	entry.inode_num = inode_num;
 	strcpy(entry.name, name.c_str());
+
 	lseek(fd, 2 * block_size + (dir - 1) * sizeof(inode), SEEK_SET);
 	read(fd, &current, sizeof(current));
 	if(current.size % block_size == 0)
@@ -179,6 +209,8 @@ void add_dir_entry(int dir, int inode_num, string name)
 	write(fd, &current, sizeof(current));
 }
 
+// Write a new inode into the given directory.
+// Type should be PLAIN, LARGE, or DIR.
 void init_inode(int dir, inode_flag type)
 {
 	current = get_inode(dir);
@@ -187,6 +219,7 @@ void init_inode(int dir, inode_flag type)
 	write_inode(dir, current);
 }
 
+// Print the inode numbers and names of all files in a directory.
 void read_contents(int inum)
 {
 	current = get_inode(inum);
@@ -205,6 +238,8 @@ void read_contents(int inum)
 	}
 
 }
+
+// Copy a file outside of the filesystem to an internal file.
 void copy_to_inode(int inum, int size)
 {
 	current = get_inode(inum);
@@ -212,6 +247,8 @@ void copy_to_inode(int inum, int size)
 	int nread, position;
 	current.size = size;
 	position = lseek(fd2, 0, SEEK_SET);
+
+	// Regular file
 	if(flag_is_set(current.flags, PLAIN))
 	{
 		while((nread=read(fd2, buffer, sizeof(buffer))) > 0)
@@ -222,6 +259,8 @@ void copy_to_inode(int inum, int size)
 			position+=nread;
 		}
 	}
+
+	// Large file
 	else if(flag_is_set(current.flags, LARGE))
 	{
 		int counter;
@@ -246,6 +285,7 @@ void copy_to_inode(int inum, int size)
 	write_inode(inum, current);
 }
 
+// Copy a file in the filesystem to an external file.
 void copy_from_inode(int inum)
 {
 	current = get_inode(inum);
@@ -253,6 +293,8 @@ void copy_from_inode(int inum)
 	int nread;
 	unsigned int num_blocks = current.size / block_size + 1;
 	lseek(fd2, 0, SEEK_SET);
+
+	// Regular file
 	if(flag_is_set(current.flags, PLAIN))
 	{
 		for(int i = 0; i < num_blocks; i++)
@@ -262,11 +304,12 @@ void copy_from_inode(int inum)
 			write(fd2, buffer, nread);
 		}
 	}
+
+	// Large file
 	else if(flag_is_set(current.flags, LARGE))
 	{
-		int counter,counter2, last_block;
+		unsigned int counter, counter2, second_block, last_block;
 		last_block = current.size / block_size;
-		unsigned int second_block;
 		counter2 = 0;
 		for(int i = 0; i < current.size / (block_size * block_size / sizeof(second_block))+1; i++)
 		{
@@ -291,6 +334,8 @@ void copy_from_inode(int inum)
 	}
 }
 
+// Return the number of the inode with this name.
+// Returns -1 if not found.
 int get_inode_number(string name)
 {
 	inode root;
@@ -315,7 +360,7 @@ int get_inode_number(string name)
 
 int main()
 {
-	// main loop for reading commands
+	// Main loop for reading commands
 	string command = "";
 	string first, filename, dirname;
 
@@ -329,19 +374,18 @@ int main()
 		if(first == "initfs")
 		{
 			ss >> filename >> fsize >> isize;
-			if(filename == "" || fsize < 1 || isize < 1 || fsize < isize)
+			if(filename == "" || fsize < 6 || isize < 1 || fsize < isize)
 			{
-				cout << "Please input a filename for the disk, a number of disk blocks, and a number of inode blocks." << endl;
+				cout << "Please input a filename for the disk, a number of disk blocks (6+), and a number of inode blocks (1+)." << endl;
 			}
 			else
 			{
-
 				fd = open(filename.c_str(), O_CREAT|O_TRUNC|O_RDWR, S_IRWXU|S_IRWXG|S_IRWXO);
 
-				// setting length of file
+				// Set length of file
 				ftruncate(fd, (off_t)fsize * block_size);
 				
-				// init free list
+				// Initialize free list
 				temp = (fsize - isize - 3) / 100;
 				for(int i = 0; i < temp; i++)
 				{
@@ -352,7 +396,6 @@ int main()
 					{
 						buf = 2 + isize + 100 * i + j;
 						write(fd, &buf, sizeof(buf));
-						// cout << "FB: " << buf << endl;
 					}	
 				}
 				nfree = (fsize - isize - 2) % 100;
@@ -361,11 +404,10 @@ int main()
 				for(int j = 0; j < nfree; j++)
 				{
 					free_blocks[j] = temp + j;
-					// cout << "FB: " << temp + j << endl;
 				}
 				avail_blocks = fsize - isize - 2;
 
-				// init inodes
+				// Initialize root directory
 				inode initial = {0};
 				set_flag(initial.flags, ALLOC);
 				set_flag(initial.flags, DIR);
@@ -376,12 +418,12 @@ int main()
 				add_dir_entry(1, 1, ".");
 				add_dir_entry(1, 1, "..");
 
-				// find free inodes and put into inode list
+				// Find free inodes and add to inode list
 				fill_inode_list();
 
 			}
 		}
-		else if(first == "cpin")
+		else if(first == "cpin") // Copy an external file into the filesystem
 		{
 			string external_file, v6_file;
 			ss >> external_file >> v6_file;
@@ -398,6 +440,7 @@ int main()
 				}
 				else
 				{
+					// Get filesize
 					struct stat stats;
 					fstat(fd2, &stats);
 					int size = stats.st_size;
@@ -413,11 +456,10 @@ int main()
 					}
 					else if(size > (avail_blocks * block_size) / (1 + 1 / (block_size / 4)) - block_size)
 					{
-						cout << "The file is too large, we need " << ceil(size / block_size) + (size / block_size) / (block_size / 4) + 1 << " free blocks to store it but we only have " << avail_blocks <<  "." << endl;
+						cout << "The file is too large, we need " << ceil(size / block_size) + (size / block_size) / (block_size / 4) + 1 << " free blocks to store it but we only have " << avail_blocks / (1 + 1 / (block_size / 4)) - 1 <<  "." << endl;
 					}
 					else
 					{
-						cout << avail_blocks << " available" << endl;
 						int inum = alloc_inode();
 						if(inum == -1)
 						{
@@ -425,18 +467,17 @@ int main()
 						}
 						else
 						{
-							// allocates and tells if large file or not
+							// Allocate and report size of file
 							init_inode(inum, (size > 27 * block_size) ? LARGE : PLAIN);
 							add_dir_entry(1, inum, v6_file);
 							copy_to_inode(inum, size);
-							//check if large later
 						}
 					}
 				}
 				close(fd2);
 			}
 		}
-		else if(first == "cpout")
+		else if(first == "cpout") // Copy an internal file out of the filesystem
 		{
 			string external_file, v6_file;
 			ss >> v6_file >> external_file;
@@ -458,37 +499,42 @@ int main()
 					{
 						cout << "The destination file couldn't be opened for writing." << endl;
 					}
-					copy_from_inode(inum);
+					else
+					{
+						copy_from_inode(inum);
+					}
 					close(fd2);
 				}
 			}
 		}
-		else if(first == "ls")
+		else if(first == "ls") // List contents of the root directory
 		{
 			read_contents(1);
 		}
-		else if(first == "mkdir")
+		else if(first == "mkdir") // Make a new directory in the root directory
 		{
 			ss >> dirname;
 			if(dirname == "")
 			{
 				cout << "Please input a name for the directory." << endl;
 			}
-			else if(avail_blocks == 0)
+			else if(avail_blocks - 1 == 0)
 			{
 				cout << "We need at least one block to make a new directory." << endl;
 			}
 			else
 			{
+				// Create new directory inode
 				int inum = alloc_inode();
 				init_inode(inum, DIR);
-				// adds to root directory
+
+				// Add to root directory
 				add_dir_entry(1, inum, dirname);
 				add_dir_entry(inum, inum, ".");
 				add_dir_entry(inum, 1, "..");
 			}
 		}
-		else if(first == "q")
+		else if(first == "q") // Quit
 		{
 			close(fd);
 			cout << "Goodbye." << endl;
